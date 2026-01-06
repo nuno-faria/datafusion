@@ -68,6 +68,80 @@ use log::trace;
 
 const FILTER_EXEC_DEFAULT_SELECTIVITY: u8 = 20;
 
+/// Builder for [`FilterExec`] to set optional parameters
+pub struct FilterExecBuilder {
+    predicate: Arc<dyn PhysicalExpr>,
+    input: Arc<dyn ExecutionPlan>,
+    projection: Option<Vec<usize>>,
+    default_selectivity: u8,
+}
+
+impl FilterExecBuilder {
+    /// Create a new builder with required parameters (predicate and input)
+    pub fn new(predicate: Arc<dyn PhysicalExpr>, input: Arc<dyn ExecutionPlan>) -> Self {
+        Self {
+            predicate,
+            input,
+            projection: None,
+            default_selectivity: FILTER_EXEC_DEFAULT_SELECTIVITY,
+        }
+    }
+
+    /// Set the projection
+    pub fn with_projection(mut self, projection: Option<Vec<usize>>) -> Self {
+        self.projection = projection;
+        self
+    }
+
+    /// Set the default selectivity
+    pub fn with_default_selectivity(mut self, default_selectivity: u8) -> Self {
+        self.default_selectivity = default_selectivity;
+        self
+    }
+
+    /// Build the FilterExec, computing properties once with all configured parameters
+    pub fn build(self) -> Result<FilterExec> {
+        // Validate predicate type
+        match self.predicate.data_type(self.input.schema().as_ref())? {
+            DataType::Boolean => {}
+            other => {
+                return plan_err!(
+                    "Filter predicate must return BOOLEAN values, got {other:?}"
+                );
+            }
+        }
+
+        // Validate selectivity
+        if self.default_selectivity > 100 {
+            return plan_err!(
+                "Default filter selectivity value needs to be less than or equal to 100"
+            );
+        }
+
+        // Validate projection if provided
+        if let Some(ref proj) = self.projection {
+            can_project(&self.input.schema(), Some(proj))?;
+        }
+
+        // Compute properties once with all parameters
+        let cache = FilterExec::compute_properties(
+            &self.input,
+            &self.predicate,
+            self.default_selectivity,
+            self.projection.as_ref(),
+        )?;
+
+        Ok(FilterExec {
+            predicate: self.predicate,
+            input: self.input,
+            metrics: ExecutionPlanMetricsSet::new(),
+            default_selectivity: self.default_selectivity,
+            cache,
+            projection: self.projection,
+        })
+    }
+}
+
 /// FilterExec evaluates a boolean predicate against all input batches to determine which rows to
 /// include in its output batches.
 #[derive(Debug, Clone)]
